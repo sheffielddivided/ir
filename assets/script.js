@@ -38,4 +38,6 @@
   var nt=document.getElementById('navtoggle');
   var side=document.querySelector('.sidebar');
   if(nt&&side){side.addEventListener('click',function(e){if(e.target.tagName==='A'){nt.checked=false;}});}
+  // load the in-page editor (CMS light); stays dormant until activated
+  var ed=document.createElement('script');ed.src='assets/editor.js';ed.defer=true;document.head.appendChild(ed);
 })();
