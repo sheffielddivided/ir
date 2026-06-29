@@ -50,6 +50,7 @@
     '#ir-toolbar button.primary{background:var(--brand);color:#fff;border-color:var(--brand)}',
     '#ir-toolbar button.primary:disabled{opacity:.55;cursor:default}',
     '#ir-toolbar .spacer{flex:1 1 auto}',
+    '#ir-toolbar .lbl{font:600 12px var(--sans);color:var(--muted);margin:0 2px}',
     '#ir-toolbar .path{font:600 12px var(--sans);color:var(--muted)}',
     '#ir-status{font:13px var(--sans);min-width:90px}',
     '#ir-status.ok{color:var(--aker-bd)}#ir-status.err{color:#c0392b}#ir-status.busy{color:var(--muted)}',
@@ -95,6 +96,44 @@
   function contentsUrl(path) {
     return '/repos/' + CONFIG.owner + '/' + CONFIG.repo + '/contents/' + encodeURIComponent(path);
   }
+  // fetch + parse JSON, throwing the GitHub error message on failure
+  function apiJson(path, opts) {
+    return api(path, opts).then(function (r) {
+      return r.text().then(function (t) {
+        var j = t ? JSON.parse(t) : {};
+        if (!r.ok) throw new Error((j && j.message) || ('GitHub-feil (' + r.status + ')'));
+        return j;
+      });
+    });
+  }
+
+  // Recompute a page's searchable text exactly the way the index was built:
+  // drop the pager nav, turn tags into spaces, decode entities, collapse, lowercase,
+  // and strip the leading "Del X – … Kapittel N – " crumb for chapter pages.
+  function articleSearchText(path) {
+    var html = cleanHTML(article.innerHTML).replace(/<nav class="pager"[\s\S]*?<\/nav>/, '');
+    var txt = html.replace(/<[^>]+>/g, ' ');
+    var ta = document.createElement('textarea');
+    ta.innerHTML = txt;
+    txt = ta.value.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (/^kapittel-/.test(path)) {
+      txt = txt.replace(/^del [ivx]+ – [^?]*?kapittel \d+ – /, '');
+    }
+    return txt;
+  }
+
+  // Update one entry's "s" field in the raw searchindex.js and re-serialize it.
+  // Returns null (skip) if the entry isn't present or the file can't be parsed.
+  function buildIndexContent(rawIdx, path, newS) {
+    var m = rawIdx.match(/SEARCH_INDEX\s*=\s*(\[[\s\S]*\])\s*;?\s*$/);
+    if (!m) return null;
+    var arr;
+    try { arr = JSON.parse(m[1]); } catch (e) { return null; }
+    var found = false;
+    for (var i = 0; i < arr.length; i++) { if (arr[i].u === path) { arr[i].s = newS; found = true; break; } }
+    if (!found) return null;
+    return 'window.SEARCH_INDEX = ' + JSON.stringify(arr) + ';\n';
+  }
 
   /* ---------- light cleanup of edited HTML ---------- */
   function cleanHTML(html) {
@@ -132,6 +171,13 @@
       '<button type="button" data-cmd="insertUnorderedList" title="Punktliste">&bull; Liste</button>' +
       '<button type="button" data-cmd="createLink" title="Lenke">\u{1F517} Lenke</button>' +
       '<button type="button" data-cmd="removeFormat" title="Fjern formatering">\u2715</button>' +
+    '</div>' +
+    '<span class="sep"></span>' +
+    '<div class="grp"><span class="lbl">Sett inn:</span>' +
+      '<button type="button" data-box="goals" title="Sett inn L\u00E6ringsm\u00E5l-boks">L\u00E6ringsm\u00E5l</button>' +
+      '<button type="button" data-box="akerbp" title="Sett inn Aker BP-boks">Aker BP</button>' +
+      '<button type="button" data-box="reflect" title="Sett inn Refleksjons-boks">Refleksjon</button>' +
+      '<button type="button" data-box="keys" title="Sett inn N\u00F8kkelpunkter-boks">N\u00F8kkelpunkter</button>' +
     '</div>' +
     '<span class="sep"></span>' +
     '<span class="path"></span>' +
@@ -209,6 +255,8 @@
     if (editing) return;
     editing = true;
     document.body.classList.add('ir-editing');
+    var pagerIn = article.querySelector('nav.pager');
+    if (pagerIn) pagerIn.setAttribute('contenteditable', 'false'); // don't let the user edit nav
     article.setAttribute('contenteditable', 'true');
     try {
       document.execCommand('defaultParagraphSeparator', false, 'p');
@@ -221,6 +269,8 @@
   function exitEdit(reloadToDiscard) {
     editing = false;
     article.removeAttribute('contenteditable');
+    var pagerIn = article.querySelector('nav.pager');
+    if (pagerIn) pagerIn.removeAttribute('contenteditable');
     document.body.classList.remove('ir-editing');
     if (reloadToDiscard) location.reload();
   }
@@ -238,6 +288,29 @@
     article.focus();
   }
 
+  // the four coloured callout boxes, inserted with placeholder text to edit
+  var BOXES = {
+    goals: '<div class="callout callout-goals"><div class="callout-label">L\u00E6ringsm\u00E5l</div><ul><li>Nytt l\u00E6ringsm\u00E5l</li></ul></div>',
+    akerbp: '<div class="callout callout-akerbp"><div class="callout-label">Slik gj\u00F8r vi det i Aker BP</div><p>Ny tekst om hvordan Aker BP gj\u00F8r dette.</p></div>',
+    reflect: '<div class="callout callout-reflect"><div class="callout-label">Refleksjonssp\u00F8rsm\u00E5l</div><ol><li>Nytt refleksjonssp\u00F8rsm\u00E5l</li></ol></div>',
+    keys: '<div class="callout callout-keys"><div class="callout-label">N\u00F8kkelpunkter</div><ul><li>Nytt n\u00F8kkelpunkt</li></ul></div>'
+  };
+  function insertBox(kind) {
+    var html = BOXES[kind];
+    if (!html) return;
+    article.focus();
+    var sel = window.getSelection();
+    if (!sel.rangeCount || !article.contains(sel.anchorNode)) {
+      var r = document.createRange();
+      r.selectNodeContents(article);
+      r.collapse(false); // caret to end of article
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
+    document.execCommand('insertHTML', false, html);
+    article.focus();
+  }
+
   /* ---------- save ---------- */
   var saveBtn = toolbar.querySelector('#ir-save');
 
@@ -248,37 +321,47 @@
     }
     var path = currentPath();
     var editedInner = cleanHTML(article.innerHTML);
+    var newS = articleSearchText(path);
+    var base = '/repos/' + CONFIG.owner + '/' + CONFIG.repo;
+    var newHtml, newIndex, baseTreeSha, parentSha;
     saveBtn.disabled = true;
     status('Lagrer \u2026', 'busy');
 
-    api(contentsUrl(path) + '?ref=' + CONFIG.branch)
-      .then(function (r) {
-        if (r.status === 401 || r.status === 403) throw new Error('Mangler tilgang \u2013 sjekk at tokenet har skrivetilgang.');
-        if (!r.ok) throw new Error('Kunne ikke hente filen (' + r.status + ').');
-        return r.json();
-      })
+    // 1. current HTML -> splice in the edited <article>
+    apiJson(contentsUrl(path) + '?ref=' + CONFIG.branch)
       .then(function (file) {
         var raw = b64decode(file.content);
-        var next = raw.replace(/<article>[\s\S]*?<\/article>/, '<article>' + editedInner + '</article>');
-        if (next === raw) throw new Error('Fant ikke <article> i filen.');
-        return api(contentsUrl(path), {
-          method: 'PUT',
-          body: JSON.stringify({
-            message: 'Rediger ' + path + ' via editor',
-            content: b64encode(next),
-            sha: file.sha,
-            branch: CONFIG.branch
-          })
-        });
+        newHtml = raw.replace(/<article>[\s\S]*?<\/article>/, '<article>' + editedInner + '</article>');
+        if (newHtml === raw) throw new Error('Fant ikke <article> i filen.');
       })
-      .then(function (r) {
-        return r.json().then(function (j) {
-          if (!r.ok) throw new Error((j && j.message) || ('Lagring feilet (' + r.status + ').'));
-          return j;
-        });
+      // 2. current search index -> update this page's "s" entry
+      .then(function () { return apiJson(contentsUrl('assets/searchindex.js') + '?ref=' + CONFIG.branch); })
+      .then(function (idxFile) {
+        newIndex = buildIndexContent(b64decode(idxFile.content), path, newS); // null if entry missing
       })
+      // 3. latest commit + its base tree
+      .then(function () { return apiJson(base + '/git/ref/heads/' + CONFIG.branch); })
+      .then(function (ref) { parentSha = ref.object.sha; return apiJson(base + '/git/commits/' + parentSha); })
+      .then(function (commit) { baseTreeSha = commit.tree.sha; })
+      // 4. blob(s): always the HTML, plus the index if we have an updated copy
       .then(function () {
-        status('Lagret \u2713', 'ok');
+        return apiJson(base + '/git/blobs', { method: 'POST', body: JSON.stringify({ content: b64encode(newHtml), encoding: 'base64' }) });
+      })
+      .then(function (htmlBlob) {
+        var tree = [{ path: path, mode: '100644', type: 'blob', sha: htmlBlob.sha }];
+        if (!newIndex) return tree;
+        return apiJson(base + '/git/blobs', { method: 'POST', body: JSON.stringify({ content: b64encode(newIndex), encoding: 'base64' }) })
+          .then(function (idxBlob) { tree.push({ path: 'assets/searchindex.js', mode: '100644', type: 'blob', sha: idxBlob.sha }); return tree; });
+      })
+      // 5. tree -> 6. commit -> 7. move the branch (one atomic commit)
+      .then(function (tree) { return apiJson(base + '/git/trees', { method: 'POST', body: JSON.stringify({ base_tree: baseTreeSha, tree: tree }) }); })
+      .then(function (tree) { return apiJson(base + '/git/commits', { method: 'POST', body: JSON.stringify({ message: 'Rediger ' + path + ' via editor', tree: tree.sha, parents: [parentSha] }) }); })
+      .then(function (commit) { return apiJson(base + '/git/refs/heads/' + CONFIG.branch, { method: 'PATCH', body: JSON.stringify({ sha: commit.sha }) }); })
+      .then(function () {
+        if (newIndex && window.SEARCH_INDEX) { // keep this tab's live search in sync
+          for (var i = 0; i < window.SEARCH_INDEX.length; i++) { if (window.SEARCH_INDEX[i].u === path) { window.SEARCH_INDEX[i].s = newS; break; } }
+        }
+        status(newIndex ? 'Lagret \u2713 (inkl. s\u00F8k)' : 'Lagret \u2713', 'ok');
         saveBtn.disabled = false;
         exitEdit(false); // keep current DOM, leave edit mode
         setTimeout(function () { status('', ''); }, 4000);
@@ -294,8 +377,10 @@
     if (editing) exitEdit(true); else enterEdit();
   });
   toolbar.addEventListener('click', function (e) {
-    var b = e.target.closest('button[data-cmd]');
-    if (b) { e.preventDefault(); exec(b.getAttribute('data-cmd'), b.getAttribute('data-val')); }
+    var c = e.target.closest('button[data-cmd]');
+    if (c) { e.preventDefault(); exec(c.getAttribute('data-cmd'), c.getAttribute('data-val')); return; }
+    var bx = e.target.closest('button[data-box]');
+    if (bx) { e.preventDefault(); insertBox(bx.getAttribute('data-box')); }
   });
   toolbar.querySelector('#ir-save').addEventListener('click', save);
   toolbar.querySelector('#ir-cancel').addEventListener('click', function () { exitEdit(true); });
